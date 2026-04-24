@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card center">
+  <h1>Email Spam & Fraud Classifier</h1>
+  <p class="subtitle">Login to classify emails, detect fraud signals, and keep your inbox safe.</p>
+  <div class="row">
+    <a class="btn" href="{{ url_for('login') }}">Login</a>
+    <a class="btn btn-outline" href="{{ url_for('register') }}">Create Account</a>
+  </div>
+</section>
+{% endblock %}
