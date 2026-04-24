@@ -3,6 +3,7 @@
 Login-based spam/fraud email classifier with:
 - local rule + Naive Bayes model
 - optional external AI classification (Gemini/OpenAI)
+- Gmail OAuth inbox scanner
 - demo proxy email and sample inbox data
 
 ## Run locally
@@ -29,6 +30,16 @@ Open `http://127.0.0.1:5000`.
    - `AI_PROVIDER=gemini` or `openai`
 
 If external API fails or key is missing, app automatically falls back to local model.
+
+## Connect real Gmail inbox
+
+Create Google OAuth Web credentials and set:
+- `GMAIL_CLIENT_ID`
+- `GMAIL_CLIENT_SECRET`
+- `GMAIL_REDIRECT_URI` (example: `https://your-app.onrender.com/gmail/callback`)
+
+In Google Cloud OAuth settings, add the same redirect URI.
+Then use **Connect Gmail** from the dashboard and run **Scan Latest Gmail Emails**.
 
 ## Deploy online (Render)
 

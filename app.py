@@ -5,11 +5,16 @@ import math
 import json
 import urllib.request
 import urllib.error
+import base64
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, flash, g, redirect, render_template, request, session, url_for
+from google.auth.transport.requests import Request as GoogleRequest
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -18,6 +23,7 @@ DB_PATH = BASE_DIR / "emails.db"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
 USE_EXTERNAL_AI = os.environ.get("USE_EXTERNAL_AI", "false").lower() == "true"
+GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 ML_CLASSES = ("Legitimate", "Spam", "Fraud")
 SEED_DATASET = [
@@ -163,6 +169,16 @@ def init_db():
             risk_score INTEGER NOT NULL,
             reasons TEXT NOT NULL,
             created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gmail_tokens (
+            user_id INTEGER PRIMARY KEY,
+            token_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(id)
         )
         """
@@ -342,6 +358,125 @@ def build_proxy_email(username: str):
     return f"{safe_name}.proxy@spammail-demo.test"
 
 
+def gmail_oauth_config():
+    client_id = os.environ.get("GMAIL_CLIENT_ID")
+    client_secret = os.environ.get("GMAIL_CLIENT_SECRET")
+    redirect_uri = os.environ.get("GMAIL_REDIRECT_URI")
+    if not client_id or not client_secret or not redirect_uri:
+        return None, None
+    config = {
+        "web": {
+            "client_id": client_id,
+            "project_id": "spamshield",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_secret": client_secret,
+            "redirect_uris": [redirect_uri],
+        }
+    }
+    return config, redirect_uri
+
+
+def save_gmail_token(user_id: int, token_payload: dict):
+    get_db().execute(
+        """
+        INSERT INTO gmail_tokens (user_id, token_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET token_json = excluded.token_json, updated_at = excluded.updated_at
+        """,
+        (user_id, json.dumps(token_payload), datetime.utcnow().isoformat()),
+    )
+    get_db().commit()
+
+
+def load_gmail_credentials(user_id: int):
+    row = get_db().execute("SELECT token_json FROM gmail_tokens WHERE user_id = ?", (user_id,)).fetchone()
+    if not row:
+        return None
+    token_data = json.loads(row["token_json"])
+    creds = Credentials.from_authorized_user_info(token_data, GMAIL_SCOPES)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(GoogleRequest())
+        save_gmail_token(
+            user_id,
+            {
+                "token": creds.token,
+                "refresh_token": creds.refresh_token,
+                "token_uri": creds.token_uri,
+                "client_id": creds.client_id,
+                "client_secret": creds.client_secret,
+                "scopes": creds.scopes,
+            },
+        )
+    return creds
+
+
+def gmail_connected_for_user(user_id: int):
+    row = get_db().execute("SELECT 1 FROM gmail_tokens WHERE user_id = ?", (user_id,)).fetchone()
+    return bool(row)
+
+
+def extract_email_text(payload: dict):
+    snippet = payload.get("snippet", "")
+    if not payload.get("payload"):
+        return snippet
+    parts = payload["payload"].get("parts", [])
+    for part in parts:
+        if part.get("mimeType") == "text/plain":
+            data = part.get("body", {}).get("data")
+            if data:
+                return base64.urlsafe_b64decode(data.encode("utf-8")).decode("utf-8", errors="ignore")
+    body_data = payload["payload"].get("body", {}).get("data")
+    if body_data:
+        return base64.urlsafe_b64decode(body_data.encode("utf-8")).decode("utf-8", errors="ignore")
+    return snippet
+
+
+def fetch_and_classify_gmail(user_id: int, max_results: int = 8):
+    creds = load_gmail_credentials(user_id)
+    if not creds:
+        return []
+
+    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+    response = service.users().messages().list(userId="me", maxResults=max_results).execute()
+    messages = response.get("messages", [])
+    classified = []
+    for item in messages:
+        details = service.users().messages().get(userId="me", id=item["id"], format="full").execute()
+        headers = {h["name"].lower(): h["value"] for h in details.get("payload", {}).get("headers", [])}
+        sender = headers.get("from", "unknown@unknown.com")
+        subject = headers.get("subject", "(no subject)")
+        body = extract_email_text(details)
+
+        local_category, local_risk_score, local_reasons, local_ml_confidence, source = classify_email(sender, subject, body)
+        external = external_ai_classify(sender, subject, body)
+        if external:
+            category = external.get("category", local_category)
+            risk_score = int(external.get("risk_score", local_risk_score))
+            ml_confidence = int(external.get("ml_confidence", local_ml_confidence))
+            reasons = f"{external.get('reasons', local_reasons)} | Provider: {external.get('source', 'external')}"
+            source = external.get("source", source)
+        else:
+            category = local_category
+            risk_score = local_risk_score
+            reasons = local_reasons
+            ml_confidence = local_ml_confidence
+
+        classified.append(
+            {
+                "sender": sender,
+                "subject": subject,
+                "category": category,
+                "risk_score": risk_score,
+                "ml_confidence": ml_confidence,
+                "source": source,
+                "reasons": reasons,
+            }
+        )
+    return classified
+
+
 @app.route("/")
 def index():
     user = current_user()
@@ -401,6 +536,66 @@ def logout():
     return redirect(url_for("index"))
 
 
+@app.route("/gmail/connect")
+def gmail_connect():
+    user = current_user()
+    if not user:
+        return redirect(url_for("login"))
+    config, redirect_uri = gmail_oauth_config()
+    if not config:
+        flash("Gmail OAuth is not configured. Add GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, and GMAIL_REDIRECT_URI.")
+        return redirect(url_for("dashboard"))
+
+    flow = Flow.from_client_config(config, scopes=GMAIL_SCOPES)
+    flow.redirect_uri = redirect_uri
+    auth_url, state = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
+    session["gmail_oauth_state"] = state
+    return redirect(auth_url)
+
+
+@app.route("/gmail/callback")
+def gmail_callback():
+    user = current_user()
+    if not user:
+        return redirect(url_for("login"))
+
+    config, redirect_uri = gmail_oauth_config()
+    if not config:
+        flash("Missing Gmail OAuth configuration.")
+        return redirect(url_for("dashboard"))
+
+    state = session.get("gmail_oauth_state")
+    flow = Flow.from_client_config(config, scopes=GMAIL_SCOPES, state=state)
+    flow.redirect_uri = redirect_uri
+    flow.fetch_token(authorization_response=request.url)
+    creds = flow.credentials
+
+    save_gmail_token(
+        user["id"],
+        {
+            "token": creds.token,
+            "refresh_token": creds.refresh_token,
+            "token_uri": creds.token_uri,
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+            "scopes": creds.scopes,
+        },
+    )
+    flash("Gmail connected. You can now scan real inbox emails.")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/gmail/disconnect", methods=["POST"])
+def gmail_disconnect():
+    user = current_user()
+    if not user:
+        return redirect(url_for("login"))
+    get_db().execute("DELETE FROM gmail_tokens WHERE user_id = ?", (user["id"],))
+    get_db().commit()
+    flash("Gmail disconnected.")
+    return redirect(url_for("dashboard"))
+
+
 @app.route("/dashboard", methods=["GET", "POST"])
 def dashboard():
     user = current_user()
@@ -408,42 +603,56 @@ def dashboard():
         return redirect(url_for("login"))
 
     result = None
+    gmail_results = []
+    action = "manual"
     if request.method == "POST":
-        sender = request.form.get("sender", "").strip()
-        subject = request.form.get("subject", "").strip()
-        body = request.form.get("body", "").strip()
-        if not sender or not subject or not body:
-            flash("Please fill all email fields.")
-            return redirect(url_for("dashboard"))
-
-        local_category, local_risk_score, local_reasons, local_ml_confidence, source = classify_email(sender, subject, body)
-        external = external_ai_classify(sender, subject, body)
-        if external:
-            category = external.get("category", local_category)
-            risk_score = int(external.get("risk_score", local_risk_score))
-            ml_confidence = int(external.get("ml_confidence", local_ml_confidence))
-            reasons = f"{external.get('reasons', local_reasons)} | Provider: {external.get('source', 'external')}"
-            source = external.get("source", source)
+        action = request.form.get("action", "manual")
+        if action == "scan_gmail":
+            if not gmail_connected_for_user(user["id"]):
+                flash("Connect Gmail first to scan real inbox emails.")
+                return redirect(url_for("dashboard"))
+            try:
+                gmail_results = fetch_and_classify_gmail(user["id"])
+                if not gmail_results:
+                    flash("No Gmail emails found to scan.")
+            except Exception:
+                flash("Could not fetch Gmail emails. Reconnect Gmail and try again.")
         else:
-            category = local_category
-            risk_score = local_risk_score
-            reasons = local_reasons
-            ml_confidence = local_ml_confidence
-        get_db().execute(
-            """
-            INSERT INTO emails (user_id, sender, subject, body, category, risk_score, reasons, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (user["id"], sender, subject, body, category, risk_score, reasons, datetime.utcnow().isoformat()),
-        )
-        get_db().commit()
-        result = {
-            "category": category,
-            "risk_score": risk_score,
-            "reasons": reasons,
-            "ml_confidence": ml_confidence,
-            "source": source,
-        }
+            sender = request.form.get("sender", "").strip()
+            subject = request.form.get("subject", "").strip()
+            body = request.form.get("body", "").strip()
+            if not sender or not subject or not body:
+                flash("Please fill all email fields.")
+                return redirect(url_for("dashboard"))
+
+            local_category, local_risk_score, local_reasons, local_ml_confidence, source = classify_email(sender, subject, body)
+            external = external_ai_classify(sender, subject, body)
+            if external:
+                category = external.get("category", local_category)
+                risk_score = int(external.get("risk_score", local_risk_score))
+                ml_confidence = int(external.get("ml_confidence", local_ml_confidence))
+                reasons = f"{external.get('reasons', local_reasons)} | Provider: {external.get('source', 'external')}"
+                source = external.get("source", source)
+            else:
+                category = local_category
+                risk_score = local_risk_score
+                reasons = local_reasons
+                ml_confidence = local_ml_confidence
+            get_db().execute(
+                """
+                INSERT INTO emails (user_id, sender, subject, body, category, risk_score, reasons, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user["id"], sender, subject, body, category, risk_score, reasons, datetime.utcnow().isoformat()),
+            )
+            get_db().commit()
+            result = {
+                "category": category,
+                "risk_score": risk_score,
+                "reasons": reasons,
+                "ml_confidence": ml_confidence,
+                "source": source,
+            }
 
     history = get_db().execute(
         """
@@ -458,6 +667,9 @@ def dashboard():
         "dashboard.html",
         user=user,
         result=result,
+        gmail_results=gmail_results,
+        gmail_connected=gmail_connected_for_user(user["id"]),
+        action=action,
         history=history,
         proxy_email=proxy_email,
         demo_email_cases=DEMO_EMAIL_CASES,

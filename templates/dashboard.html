@@ -1,44 +1,95 @@
 {% extends "base.html" %}
 {% block content %}
-<h2>Welcome, {{ user['username'] }}</h2>
+<h2 class="page-title">Welcome, {{ user['username'] }}</h2>
 
-<section class="card">
-  <h3>Demo Proxy Email</h3>
-  <p>Use this testing email in your demo:</p>
+<section class="card gradient-card">
+  <h3>Real Inbox Scanner</h3>
+  <p class="subtitle">Connect Gmail to classify real inbox emails automatically.</p>
   <div class="inline-actions">
-    <p><strong id="proxyEmail">{{ proxy_email }}</strong></p>
-    <button class="btn btn-small btn-outline" type="button" onclick="copyProxyEmail()">Copy</button>
+    {% if gmail_connected %}
+      <span class="pill legitimate">Gmail Connected</span>
+      <form method="post" class="inline-form">
+        <input type="hidden" name="action" value="scan_gmail">
+        <button class="btn" type="submit">Scan Latest Gmail Emails</button>
+      </form>
+      <form method="post" action="{{ url_for('gmail_disconnect') }}" class="inline-form">
+        <button class="btn btn-outline" type="submit">Disconnect Gmail</button>
+      </form>
+    {% else %}
+      <span class="pill spam">Gmail Not Connected</span>
+      <a class="btn" href="{{ url_for('gmail_connect') }}">Connect Gmail</a>
+    {% endif %}
   </div>
-  <p class="subtitle">This is a demo proxy identity for presentation/testing in this app.</p>
 </section>
 
-<section class="card">
-  <h3>Classify Email</h3>
-  <form method="post" id="emailForm">
-    <label>Sender Email</label>
-    <input type="email" id="sender" name="sender" placeholder="alerts@example.com" required>
-
-    <label>Subject</label>
-    <input type="text" id="subject" name="subject" placeholder="Urgent: Verify your account" required>
-
-    <label>Email Body</label>
-    <textarea id="body" name="body" rows="7" placeholder="Paste complete email content here..." required></textarea>
-
+<div class="grid-two">
+  <section class="card">
+    <h3>Demo Proxy Email</h3>
+    <p>Use this testing email in your demo:</p>
     <div class="inline-actions">
-      <button class="btn" type="submit">Analyze Email</button>
-      <button class="btn btn-outline" type="button" onclick="clearForm()">Clear Form</button>
+      <p><strong id="proxyEmail">{{ proxy_email }}</strong></p>
+      <button class="btn btn-small btn-outline" type="button" onclick="copyProxyEmail()">Copy</button>
     </div>
-  </form>
-</section>
+    <p class="subtitle">This is a demo proxy identity for presentation/testing in this app.</p>
+  </section>
+
+  <section class="card">
+    <h3>Classify Manual Email</h3>
+    <form method="post" id="emailForm">
+      <input type="hidden" name="action" value="manual">
+      <label>Sender Email</label>
+      <input type="email" id="sender" name="sender" placeholder="alerts@example.com" required>
+
+      <label>Subject</label>
+      <input type="text" id="subject" name="subject" placeholder="Urgent: Verify your account" required>
+
+      <label>Email Body</label>
+      <textarea id="body" name="body" rows="7" placeholder="Paste complete email content here..." required></textarea>
+
+      <div class="inline-actions">
+        <button class="btn" type="submit">Analyze Email</button>
+        <button class="btn btn-outline" type="button" onclick="clearForm()">Clear Form</button>
+      </div>
+    </form>
+  </section>
+</div>
 
 {% if result %}
 <section class="card result">
-  <h3>Fraud Signals (Unique Feature)</h3>
+  <h3>Fraud Signals</h3>
   <p><strong>Classification:</strong> <span class="pill {{ result.category|lower }}">{{ result.category }}</span></p>
   <p><strong>Risk Score:</strong> {{ result.risk_score }}/100</p>
   <p><strong>ML Confidence:</strong> {{ result.ml_confidence }}%</p>
   <p><strong>Model Source:</strong> {{ result.source }}</p>
   <p><strong>Reason Trace:</strong> {{ result.reasons }}</p>
+</section>
+{% endif %}
+
+{% if gmail_results %}
+<section class="card">
+  <h3>Gmail Scan Results</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Sender</th>
+        <th>Subject</th>
+        <th>Type</th>
+        <th>Risk</th>
+        <th>Source</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in gmail_results %}
+      <tr>
+        <td>{{ row.sender }}</td>
+        <td>{{ row.subject }}</td>
+        <td><span class="pill {{ row.category|lower }}">{{ row.category }}</span></td>
+        <td>{{ row.risk_score }}</td>
+        <td>{{ row.source }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </section>
 {% endif %}
 

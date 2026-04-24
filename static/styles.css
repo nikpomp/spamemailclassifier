@@ -29,7 +29,7 @@ body {
 }
 
 .container {
-  max-width: 900px;
+  max-width: 1080px;
   margin: 24px auto;
   padding: 0 14px;
 }
@@ -40,6 +40,21 @@ body {
   border-radius: 10px;
   padding: 18px;
   margin-bottom: 16px;
+  box-shadow: 0 8px 24px rgba(2, 6, 23, 0.25);
+}
+
+.gradient-card {
+  background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+}
+
+.grid-two {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.page-title {
+  margin-bottom: 10px;
 }
 
 .center {
@@ -60,6 +75,10 @@ form {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.inline-form {
+  margin: 0;
 }
 
 input, textarea {
@@ -145,4 +164,10 @@ th, td {
   border-bottom: 1px solid #334155;
   padding: 8px;
   text-align: left;
+}
+
+@media (max-width: 900px) {
+  .grid-two {
+    grid-template-columns: 1fr;
+  }
 }
