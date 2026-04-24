@@ -30,8 +30,17 @@ Open `http://127.0.0.1:5000`.
 
 If external API fails or key is missing, app automatically falls back to local model.
 
-## Deploy online (Render/Railway)
+## Deploy online (Render)
 
-- Use start command: `python app.py`
-- Set environment variables from `.env.example`
-- Add a persistent disk if you want `emails.db` saved across restarts
+This repo includes `render.yaml` for one-click Blueprint deploy.
+
+1. Open [Render Blueprint](https://dashboard.render.com/blueprint/new)
+2. Connect your GitHub and select this repo
+3. Add `GEMINI_API_KEY` when prompted
+4. Deploy
+
+Service will use:
+- Build: `pip install -r requirements.txt`
+- Start: `gunicorn app:app --bind 0.0.0.0:$PORT`
+
+Note: free instances can sleep. Add a persistent disk if you want `emails.db` kept across restarts.
